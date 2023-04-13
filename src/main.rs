@@ -10,27 +10,39 @@ mod geometry;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, num_args = 2, value_names = ["WIDTH", "HEIGHT"], default_values_t = [640, 360])]
+    #[arg(short, long, num_args = 2,
+        value_names = ["WIDTH", "HEIGHT"],
+        default_values_t = [640, 360])]
     /// the size of the output image
     geometry: Vec<u32>,
 
-    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..), default_value_t = 30)]
+    #[arg(short, long, 
+        value_parser = clap::value_parser!(u32).range(1..),
+        default_value_t = 30)]
     /// the number of samples per pixel
     samples: u32,
 
-    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..), default_value_t = 2)]
+    #[arg(short, long,
+        value_parser = clap::value_parser!(u32).range(1..),
+        default_value_t = 2)]
     /// the max number of bounces per ray
     bounces: u32,
 
-    #[arg(short, long, value_name = "ANGLE", default_value_t = 30.0)]
+    #[arg(short, long,
+        value_name = "ANGLE",
+        default_value_t = 30.0)]
     /// vertical field of view in degrees
     fov: f64,
 
-    #[arg(short = 'l', long, value_name = "LENGTH", default_value_t = 3.0)]
+    #[arg(short = 'l', long, 
+        value_name = "LENGTH", 
+        default_value_t = 3.0)]
     /// focal length
     focal_length: f64,
 
-    #[arg(short, long, value_name = "RADIUS", default_value_t = 0.0)]
+    #[arg(short, long,
+        value_name = "RADIUS",
+        default_value_t = 0.0)]
     /// aperture for depth of field
     aperture: f64,
 
@@ -54,7 +66,9 @@ impl fmt::Debug for RsTraceError {
 impl fmt::Display for RsTraceError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::OutError => write!(f, "Please redirect stdout to a file or pipe"),
+            Self::OutError => {
+                write!(f, "Please redirect stdout to a file or pipe")
+            }
             Self::EncodingError(e) => e.fmt(f),
             Self::IoError(e) => e.fmt(f),
         }
@@ -115,5 +129,8 @@ fn main() -> Result<(), RsTraceError> {
 }
 
 unsafe fn as_u8_slice<T: Sized>(p: &[T]) -> &[u8] {
-    std::slice::from_raw_parts(p.as_ptr() as *const u8, std::mem::size_of::<T>() * p.len())
+    std::slice::from_raw_parts(
+        p.as_ptr() as *const u8,
+        std::mem::size_of::<T>() * p.len(),
+    )
 }
