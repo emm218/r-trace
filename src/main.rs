@@ -1,5 +1,6 @@
 #![feature(is_terminal)]
 
+use indicatif::ProgressIterator;
 use clap::Parser;
 use std::fmt;
 use std::io::{self, BufWriter, IsTerminal};
@@ -8,7 +9,8 @@ use std::path::PathBuf;
 mod color;
 mod geometry;
 
-use geometry::vec3::Vec3;
+use color::Color;
+use geometry::{Plane, Sphere, Hittable, HitInfo, vec3::{dot, Vec3}};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -92,30 +94,39 @@ struct Pixel {
     b: u8,
 }
 
-impl From<color::Color> for Pixel {
+impl From<Color> for Pixel {
     fn from(c: color::Color) -> Pixel {
         Pixel {
-            r: (255.0 * c.r) as u8,
-            g: (255.0 * c.g) as u8,
-            b: (255.0 * c.b) as u8,
+            r: (255.0 * c.r.sqrt()) as u8,
+            g: (255.0 * c.g.sqrt()) as u8,
+            b: (255.0 * c.b.sqrt()) as u8,
         }
     }
 }
 
-const WHITE: color::Color = color::Color {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-};
-const LIGHT_BLUE: color::Color = color::Color {
-    r: 0.5,
-    g: 0.7,
-    b: 1.0,
-};
-
-fn ray_color(r: geometry::Ray) -> color::Color {
+fn ray_color(r: &geometry::Ray, h: &Vec<Box<dyn Hittable>>, depth: u32) -> color::Color {
+    if depth == 0 {
+        return Color::BLACK;
+    }
+    let mut best_hi: Option<HitInfo> = None;
+    for b in h {
+        if let Some(new_hi) = match best_hi {
+            None => (*b).hit(r, 0.0001, f32::INFINITY),
+            Some(ref hi) => (*b).hit(r, 0.0001, hi.t)
+        } {
+            best_hi = Some(new_hi);
+        }
+    }
+    if let Some(hi) = best_hi {
+        let mut direction = Vec3::<f32>::random_unit_ball();
+        if dot(hi.normal, direction) < 0.0 {
+            direction = -direction;
+        }
+        let new_r = geometry::Ray { origin: hi.at, direction };
+        return dot(hi.normal, direction) * ray_color(&new_r, h, depth - 1);
+    }
     let t = 0.5 * (r.direction.y + 1.0);
-    color::blend(WHITE, LIGHT_BLUE, t)
+    color::blend(Color::LIGHT_BLUE, Color::WHITE, t)
 }
 
 fn main() -> Result<(), RsTraceError> {
@@ -140,19 +151,27 @@ fn main() -> Result<(), RsTraceError> {
     let aspect_ratio = width as f32 / height as f32;
     let vh = 2.0;
     let vw = 2.0 * aspect_ratio;
-    let lower_left = vec3!(-vw * 0.5, -vh * 0.5, args.focal_length);
+    let upper_left = vec3!(-vw * 0.5, vh * 0.5, args.focal_length);
     let origin = vec3!(0.0, 0.0, 0.0);
     let mut r: geometry::Ray;
-    for y in 0..height {
+
+    let s = Box::new(Sphere { center: vec3!(0.0, 0.0, 1.0), radius: 0.5 });
+    let p = Box::new(Plane { point: vec3!(0.0, -0.5, 0.0), normal: Vec3::<f32>::J });
+    let world: Vec<Box<dyn Hittable>> = vec![s, p];
+    for y in (0..height).progress() {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            let target = lower_left
-                + vec3!(x as f32 / width as f32, y as f32 / height as f32, 0.0);
+            let target = upper_left
+                + vec3!(x as f32 * vw / width as f32, -(y as f32) * vh / height as f32, 0.0);
+            let mut color = Color::BLACK;
             r = geometry::Ray {
                 origin,
                 direction: target - origin,
             };
-            buf[idx] = ray_color(r).into();
+            for _ in 0..args.samples {
+                color = color + ray_color(&r, &world, args.bounces + 1).into();
+            }
+            buf[idx] = (color / args.samples as f32).into(); 
         }
     }
     let bytes = unsafe { as_u8_slice(&buf) };
@@ -168,4 +187,3 @@ unsafe fn as_u8_slice<T: Sized>(p: &[T]) -> &[u8] {
         std::mem::size_of::<T>() * p.len(),
     )
 }
-
