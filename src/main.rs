@@ -1,7 +1,8 @@
 #![feature(is_terminal)]
 
-use indicatif::ProgressIterator;
 use clap::Parser;
+use indicatif::ProgressIterator;
+use rand::random;
 use std::fmt;
 use std::io::{self, BufWriter, IsTerminal};
 use std::path::PathBuf;
@@ -10,26 +11,23 @@ mod color;
 mod geometry;
 
 use color::Color;
-use geometry::{Plane, Sphere, Hittable, HitInfo, vec3::{dot, Vec3}};
+use geometry::{
+    vec3::{cross, dot, Vec3},
+    HitInfo, Hittable, Plane, Sphere,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, num_args = 2,
-        value_names = ["WIDTH", "HEIGHT"],
-        default_values_t = [640, 360])]
+    #[arg(short, long, num_args = 2, value_names = ["WIDTH", "HEIGHT"], default_values_t = [640, 360])]
     /// the size of the output image
     geometry: Vec<u32>,
 
-    #[arg(short, long, 
-        value_parser = clap::value_parser!(u32).range(1..),
-        default_value_t = 30)]
+    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..), default_value_t = 30)]
     /// the number of samples per pixel
     samples: u32,
 
-    #[arg(short, long,
-        value_parser = clap::value_parser!(u32).range(1..),
-        default_value_t = 2)]
+    #[arg(short, long, value_parser = clap::value_parser!(u32).range(1..), default_value_t = 2)]
     /// the max number of bounces per ray
     bounces: u32,
 
@@ -104,15 +102,66 @@ impl From<Color> for Pixel {
     }
 }
 
-fn ray_color(r: &geometry::Ray, h: &Vec<Box<dyn Hittable>>, depth: u32) -> color::Color {
+struct Camera {
+    horizontal: Vec3<f32>,
+    vertical: Vec3<f32>,
+    upper_left: Vec3<f32>,
+    eye: Vec3<f32>,
+}
+
+impl Camera {
+    pub fn new(
+        eye: Vec3<f32>,
+        look_at: Vec3<f32>,
+        up: Vec3<f32>,
+        fov: f32,
+        aspect_ratio: f32,
+    ) -> Camera {
+        let v_look = look_at - eye;
+        let fov_rads = fov * std::f32::consts::PI / 180.0;
+        let vh = (fov_rads / 2.0).tan().abs() * v_look.magnitude() * 2.0;
+        let vw = vh * aspect_ratio;
+
+        let vertical = (up - dot(up, v_look) / dot(v_look, v_look) * v_look)
+            .normalize()
+            * vh;
+        let horizontal = -cross(vertical, v_look).normalize() * vw;
+
+        let upper_left = v_look - 0.5 * vertical - 0.5 * horizontal;
+
+        Camera {
+            eye,
+            vertical,
+            horizontal,
+            upper_left,
+        }
+    }
+
+    pub fn ray(&self, u: f32, v: f32) -> geometry::Ray {
+        geometry::Ray {
+            origin: self.eye,
+            direction: self.upper_left
+                + u * self.horizontal
+                + (1.0 - v) * self.vertical,
+        }
+    }
+}
+
+const EPSILON: f32 = 0.00001;
+
+fn ray_color(
+    r: &geometry::Ray,
+    h: &Vec<Box<dyn Hittable>>,
+    depth: u32,
+) -> Color {
     if depth == 0 {
         return Color::BLACK;
     }
     let mut best_hi: Option<HitInfo> = None;
     for b in h {
         if let Some(new_hi) = match best_hi {
-            None => (*b).hit(r, 0.0001, f32::INFINITY),
-            Some(ref hi) => (*b).hit(r, 0.0001, hi.t)
+            None => (*b).hit(r, EPSILON, f32::INFINITY),
+            Some(ref hi) => (*b).hit(r, EPSILON, hi.t),
         } {
             best_hi = Some(new_hi);
         }
@@ -122,10 +171,16 @@ fn ray_color(r: &geometry::Ray, h: &Vec<Box<dyn Hittable>>, depth: u32) -> color
         if dot(hi.normal, direction) < 0.0 {
             direction = -direction;
         }
-        let new_r = geometry::Ray { origin: hi.at, direction };
-        return dot(hi.normal, direction) * ray_color(&new_r, h, depth - 1);
+        let new_r = geometry::Ray {
+            origin: hi.at,
+            direction,
+        };
+        return 0.8
+            * dot(hi.normal, direction)
+            * ray_color(&new_r, h, depth - 1);
     }
-    let t = 0.5 * (r.direction.y + 1.0);
+    let unit_dir = r.direction.normalize();
+    let t = 0.5 * (unit_dir.y + 1.0);
     color::blend(Color::LIGHT_BLUE, Color::WHITE, t)
 }
 
@@ -149,29 +204,42 @@ fn main() -> Result<(), RsTraceError> {
     let mut buf = vec![Pixel { r: 0, g: 0, b: 0 }; (width * height) as usize];
 
     let aspect_ratio = width as f32 / height as f32;
-    let vh = 2.0;
-    let vw = 2.0 * aspect_ratio;
-    let upper_left = vec3!(-vw * 0.5, vh * 0.5, args.focal_length);
-    let origin = vec3!(0.0, 0.0, 0.0);
     let mut r: geometry::Ray;
 
-    let s = Box::new(Sphere { center: vec3!(0.0, 0.0, 1.0), radius: 0.5 });
-    let p = Box::new(Plane { point: vec3!(0.0, -0.5, 0.0), normal: Vec3::<f32>::J });
-    let world: Vec<Box<dyn Hittable>> = vec![s, p];
+    let s1 = Box::new(Sphere {
+        center: vec3!(-0.6, 0.0, 3.0),
+        radius: 0.5,
+    });
+    let s2 = Box::new(Sphere {
+        center: vec3!(0.6, 0.0, 3.0),
+        radius: 0.5,
+    });
+    let p = Box::new(Plane {
+        point: vec3!(0.0, -0.5, 0.0),
+        normal: Vec3::<f32>::J,
+    });
+
+    let c = Camera::new(
+        Vec3::<f32>::J,
+        Vec3::<f32>::K * args.focal_length,
+        Vec3::<f32>::J,
+        args.fov,
+        aspect_ratio,
+    );
+
+    let world: Vec<Box<dyn Hittable>> = vec![s1, s2, p];
     for y in (0..height).progress() {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            let target = upper_left
-                + vec3!(x as f32 * vw / width as f32, -(y as f32) * vh / height as f32, 0.0);
             let mut color = Color::BLACK;
-            r = geometry::Ray {
-                origin,
-                direction: target - origin,
-            };
             for _ in 0..args.samples {
+                r = c.ray(
+                    (x as f32 + random::<f32>()) / width as f32,
+                    (y as f32 + random::<f32>()) / height as f32,
+                );
                 color = color + ray_color(&r, &world, args.bounces + 1).into();
             }
-            buf[idx] = (color / args.samples as f32).into(); 
+            buf[idx] = (color / args.samples as f32).into();
         }
     }
     let bytes = unsafe { as_u8_slice(&buf) };
