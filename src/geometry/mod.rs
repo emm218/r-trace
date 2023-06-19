@@ -1,4 +1,5 @@
 pub mod vec3;
+pub mod world;
 
 use vec3::{dot, Vec3};
 
