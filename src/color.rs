@@ -81,8 +81,8 @@ impl Color {
     };
 
     pub const LIGHT_BLUE: Color = Color {
-        r: 0.5,
-        g: 0.7,
+        r: 0.25,
+        g: 0.5,
         b: 1.0,
     };
 }

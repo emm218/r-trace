@@ -19,6 +19,8 @@ macro_rules! vec3 {
     };
 }
 
+pub(crate) use vec3;
+
 impl<U: Copy, T: Add<Output = U> + Copy> Add<Vec3<T>> for Vec3<T> {
     type Output = Vec3<U>;
 

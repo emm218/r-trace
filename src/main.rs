@@ -4,7 +4,8 @@ use clap::Parser;
 use indicatif::ProgressIterator;
 use rand::random;
 use std::fmt;
-use std::io::{self, BufWriter, IsTerminal};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal};
 use std::path::PathBuf;
 
 mod color;
@@ -12,8 +13,9 @@ mod geometry;
 
 use color::Color;
 use geometry::{
-    vec3::{cross, dot, Vec3},
-    HitInfo, Hittable, Plane, Sphere,
+    vec3::{dot, Vec3},
+    world::load_world,
+    Hittable, Plane, Sphere,
 };
 
 #[derive(Parser, Debug)]
@@ -31,13 +33,13 @@ struct Args {
     /// the max number of bounces per ray
     bounces: u32,
 
-    #[arg(short, long, value_name = "ANGLE", default_value_t = 30.0)]
+    #[arg(short, long, value_name = "ANGLE")]
     /// vertical field of view in degrees
-    fov: f32,
+    fov: Option<f32>,
 
-    #[arg(short = 'l', long, value_name = "LENGTH", default_value_t = 3.0)]
+    #[arg(short = 'l', long, value_name = "LENGTH")]
     /// focal length
-    focal_length: f32,
+    focal_length: Option<f32>,
 
     #[arg(short, long, value_name = "RADIUS", default_value_t = 0.0)]
     /// aperture for depth of field
@@ -50,6 +52,7 @@ enum RsTraceError {
     OutError,
     EncodingError(png::EncodingError),
     IoError(std::io::Error),
+    WorldError(geometry::world::WorldError),
 }
 
 impl std::error::Error for RsTraceError {}
@@ -68,6 +71,7 @@ impl fmt::Display for RsTraceError {
             }
             Self::EncodingError(e) => e.fmt(f),
             Self::IoError(e) => e.fmt(f),
+            Self::WorldError(e) => e.fmt(f),
         }
     }
 }
@@ -81,6 +85,12 @@ impl From<png::EncodingError> for RsTraceError {
 impl From<std::io::Error> for RsTraceError {
     fn from(e: std::io::Error) -> RsTraceError {
         RsTraceError::IoError(e)
+    }
+}
+
+impl From<geometry::world::WorldError> for RsTraceError {
+    fn from(e: geometry::world::WorldError) -> RsTraceError {
+        RsTraceError::WorldError(e)
     }
 }
 
@@ -102,71 +112,13 @@ impl From<Color> for Pixel {
     }
 }
 
-struct Camera {
-    horizontal: Vec3<f32>,
-    vertical: Vec3<f32>,
-    upper_left: Vec3<f32>,
-    eye: Vec3<f32>,
-}
-
-impl Camera {
-    pub fn new(
-        eye: Vec3<f32>,
-        look_at: Vec3<f32>,
-        up: Vec3<f32>,
-        fov: f32,
-        aspect_ratio: f32,
-    ) -> Camera {
-        let v_look = look_at - eye;
-        let fov_rads = fov * std::f32::consts::PI / 180.0;
-        let vh = (fov_rads / 2.0).tan().abs() * v_look.magnitude() * 2.0;
-        let vw = vh * aspect_ratio;
-
-        let vertical = (up - dot(up, v_look) / dot(v_look, v_look) * v_look)
-            .normalize()
-            * vh;
-        let horizontal = -cross(vertical, v_look).normalize() * vw;
-
-        let upper_left = v_look - 0.5 * vertical - 0.5 * horizontal;
-
-        Camera {
-            eye,
-            vertical,
-            horizontal,
-            upper_left,
-        }
-    }
-
-    pub fn ray(&self, u: f32, v: f32) -> geometry::Ray {
-        geometry::Ray {
-            origin: self.eye,
-            direction: self.upper_left
-                + u * self.horizontal
-                + (1.0 - v) * self.vertical,
-        }
-    }
-}
-
 const EPSILON: f32 = 0.00001;
 
-fn ray_color(
-    r: &geometry::Ray,
-    h: &Vec<Box<dyn Hittable>>,
-    depth: u32,
-) -> Color {
+fn ray_color(r: &geometry::Ray, h: &dyn Hittable, depth: u32) -> Color {
     if depth == 0 {
         return Color::BLACK;
     }
-    let mut best_hi: Option<HitInfo> = None;
-    for b in h {
-        if let Some(new_hi) = match best_hi {
-            None => (*b).hit(r, EPSILON, f32::INFINITY),
-            Some(ref hi) => (*b).hit(r, EPSILON, hi.t),
-        } {
-            best_hi = Some(new_hi);
-        }
-    }
-    if let Some(hi) = best_hi {
+    if let Some(hi) = h.hit(r, EPSILON, f32::INFINITY) {
         let mut direction = Vec3::<f32>::random_unit_ball();
         if dot(hi.normal, direction) < 0.0 {
             direction = -direction;
@@ -175,9 +127,7 @@ fn ray_color(
             origin: hi.at,
             direction,
         };
-        return 0.8
-            * dot(hi.normal, direction)
-            * ray_color(&new_r, h, depth - 1);
+        return dot(hi.normal, direction) * ray_color(&new_r, h, depth - 1);
     }
     let unit_dir = r.direction.normalize();
     let t = 0.5 * (unit_dir.y + 1.0);
@@ -194,6 +144,18 @@ fn main() -> Result<(), RsTraceError> {
         return Err(RsTraceError::OutError);
     }
 
+    let aspect_ratio = width as f32 / height as f32;
+    let mut reader: Box<dyn BufRead> = match args.file {
+        Some(path) => {
+            let file = File::open(path)?;
+            Box::new(BufReader::new(file))
+        }
+        None => Box::new(BufReader::new(io::stdin())),
+    };
+
+    let world =
+        load_world(&mut reader, aspect_ratio, args.focal_length, args.fov)?;
+
     let handle = BufWriter::new(stdout);
     let mut encoder = png::Encoder::new(handle, width, height);
     encoder.set_color(png::ColorType::Rgb);
@@ -203,37 +165,13 @@ fn main() -> Result<(), RsTraceError> {
 
     let mut buf = vec![Pixel { r: 0, g: 0, b: 0 }; (width * height) as usize];
 
-    let aspect_ratio = width as f32 / height as f32;
     let mut r: geometry::Ray;
-
-    let s1 = Box::new(Sphere {
-        center: vec3!(-0.6, 0.0, 3.0),
-        radius: 0.5,
-    });
-    let s2 = Box::new(Sphere {
-        center: vec3!(0.6, 0.0, 3.0),
-        radius: 0.5,
-    });
-    let p = Box::new(Plane {
-        point: vec3!(0.0, -0.5, 0.0),
-        normal: Vec3::<f32>::J,
-    });
-
-    let c = Camera::new(
-        Vec3::<f32>::J,
-        Vec3::<f32>::K * args.focal_length,
-        Vec3::<f32>::J,
-        args.fov,
-        aspect_ratio,
-    );
-
-    let world: Vec<Box<dyn Hittable>> = vec![s1, s2, p];
     for y in (0..height).progress() {
         for x in 0..width {
             let idx = (y * width + x) as usize;
             let mut color = Color::BLACK;
             for _ in 0..args.samples {
-                r = c.ray(
+                r = world.camera.ray(
                     (x as f32 + random::<f32>()) / width as f32,
                     (y as f32 + random::<f32>()) / height as f32,
                 );
